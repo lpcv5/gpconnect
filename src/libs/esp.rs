@@ -32,6 +32,7 @@ pub struct ESPPacket {
     seq: u32,
     iv: [u8; 16],
     data: Vec<u8>,
+    hmac: [u8; 12],
 }
 
 impl ESPPacket {
@@ -41,6 +42,7 @@ impl ESPPacket {
             seq: esp.seq,
             iv: esp.iv,
             data,
+            hmac: [0u8; 12],
         }
     }
 
@@ -48,9 +50,16 @@ impl ESPPacket {
         let spi = u32::from_be_bytes(data[0..4].try_into().unwrap());
         let seq = u32::from_be_bytes(data[4..8].try_into().unwrap());
         let iv = data[8..24].try_into().unwrap();
-        let data = data[24..].to_vec();
+        let hmac = data[data.len() - 12..].try_into().unwrap();
+        let data = data[24..data.len() - 12].to_vec();
 
-        Ok(ESPPacket { spi, seq, iv, data })
+        Ok(ESPPacket {
+            spi,
+            seq,
+            iv,
+            data,
+            hmac,
+        })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -59,6 +68,7 @@ impl ESPPacket {
         packet.extend_from_slice(&self.seq.to_be_bytes());
         packet.extend_from_slice(&self.iv);
         packet.extend_from_slice(&self.data);
+        packet.extend_from_slice(&self.hmac);
         packet
     }
 
@@ -81,17 +91,17 @@ impl ESPPacket {
 
         // 计算 HMAC
         let hmac = hmacsha1::hmac_sha1(&esp.mac_key, &self.data);
-        self.data.extend_from_slice(&hmac);
+        self.hmac = hmac;
 
         Ok(())
     }
 
     pub fn decrypt(&mut self, esp: &ESP) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         // 验证 HMAC
-        let hmac = &self.data[self.data.len() - 20..];
-        let data = &self.data[..self.data.len() - 20];
+        let hmac = &self.hmac;
+        let data = &self.data;
         let expected_hmac = hmacsha1::hmac_sha1(&esp.mac_key, data);
-        if expected_hmac != hmac {
+        if &expected_hmac != hmac {
             return Err("HMAC verification failed".into());
         }
 
@@ -103,5 +113,46 @@ impl ESPPacket {
         let data = &data[..data.len() - padding_len];
 
         Ok(data.to_vec())
+    }
+}
+
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_esp() {
+        let data_hex =
+        "4500002cdc4c40004001a5480ac121010ac182b90000103c474702cd6d6f6e69746f72000070616e20686120";
+        let data = hex::decode(data_hex).unwrap();
+
+        let mut esp_out = ESP::new(
+            1u32,
+            0x6f77893a,
+            hex::decode("510f909f4014dfec78b3bb8c7cbe86ac")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            hex::decode("678c7e80dd68ee69e1279da28054186de9ec113c")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        let mut esppacket = ESPPacket::new(&mut esp_out, data.clone().try_into().unwrap());
+        if let Err(e) = esppacket.encrypt(&esp_out) {
+            panic!("Encrypt error: {}", e);
+        }
+        let data_out = esppacket.to_bytes();
+
+        let mut esppacket_in = ESPPacket::from_bytes(&data_out).unwrap();
+        assert_eq!(esppacket_in.spi, esppacket.spi);
+        assert_eq!(esppacket_in.seq, esppacket.seq);
+        assert_eq!(esppacket_in.iv, esppacket.iv);
+        assert_eq!(esppacket_in.data, esppacket.data);
+        assert_eq!(esppacket_in.hmac, esppacket.hmac);
+
+        match esppacket_in.decrypt(&esp_out) {
+            Ok(data) => assert_eq!(data, data),
+            Err(e) => panic!("Decrypt error: {}", e),
+        }
     }
 }
