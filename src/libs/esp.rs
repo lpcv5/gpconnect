@@ -31,7 +31,7 @@ pub struct ESPPacket {
     spi: u32,
     seq: u32,
     iv: [u8; 16],
-    data: Vec<u8>,
+    pub data: Vec<u8>,
     hmac: [u8; 12],
 }
 
@@ -46,12 +46,12 @@ impl ESPPacket {
         }
     }
 
-    pub fn from_bytes(data: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        let spi = u32::from_be_bytes(data[0..4].try_into().unwrap());
-        let seq = u32::from_be_bytes(data[4..8].try_into().unwrap());
-        let iv = data[8..24].try_into().unwrap();
-        let hmac = data[data.len() - 12..].try_into().unwrap();
-        let data = data[24..data.len() - 12].to_vec();
+    pub fn from_bytes(bytesdata: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        let spi = u32::from_be_bytes(bytesdata[0..4].try_into().unwrap());
+        let seq = u32::from_be_bytes(bytesdata[4..8].try_into().unwrap());
+        let iv = bytesdata[8..24].try_into().unwrap();
+        let hmac = bytesdata[bytesdata.len() - 12..].try_into().unwrap();
+        let data = bytesdata[24..bytesdata.len() - 12].to_vec();
 
         Ok(ESPPacket {
             spi,
@@ -116,6 +116,7 @@ impl ESPPacket {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -125,7 +126,7 @@ mod tests {
         "4500002cdc4c40004001a5480ac121010ac182b90000103c474702cd6d6f6e69746f72000070616e20686120";
         let data = hex::decode(data_hex).unwrap();
 
-        let mut esp_out = ESP::new(
+        let esp = ESP::new(
             1u32,
             0x6f77893a,
             hex::decode("510f909f4014dfec78b3bb8c7cbe86ac")
@@ -137,8 +138,8 @@ mod tests {
                 .try_into()
                 .unwrap(),
         );
-        let mut esppacket = ESPPacket::new(&mut esp_out, data.clone().try_into().unwrap());
-        if let Err(e) = esppacket.encrypt(&esp_out) {
+        let mut esppacket = ESPPacket::new(&esp, data.clone().try_into().unwrap());
+        if let Err(e) = esppacket.encrypt(&esp) {
             panic!("Encrypt error: {}", e);
         }
         let data_out = esppacket.to_bytes();
@@ -150,7 +151,7 @@ mod tests {
         assert_eq!(esppacket_in.data, esppacket.data);
         assert_eq!(esppacket_in.hmac, esppacket.hmac);
 
-        match esppacket_in.decrypt(&esp_out) {
+        match esppacket_in.decrypt(&esp) {
             Ok(data) => assert_eq!(data, data),
             Err(e) => panic!("Decrypt error: {}", e),
         }
