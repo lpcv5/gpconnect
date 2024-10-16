@@ -4,6 +4,13 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
 use std::error::Error;
+use tao::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoopBuilder},
+    window::WindowBuilder,
+};
+use wry::{http::Request, WebViewBuilder};
+
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -11,7 +18,7 @@ pub async fn get_login_url() -> Result<String, Box<dyn Error>> {
     let client = Client::builder()
         .danger_accept_invalid_certs(true) // This disables SSL certificate verification
         .build()?;
-    let endpoint = "https://47.100.9.56/ssl-vpn/prelogin.esp";
+    let endpoint = "https://sig.gpcloudservice.com/global-protect/prelogin.esp";
     let params = [
         ("kerberos-support", "yes"),
         ("tmp", "tmp"),
@@ -43,9 +50,73 @@ struct PreloginResponse {
     saml_request: Option<String>,
 }
 
+enum UserEvent {
+    CloseWindow(String),
+}
+
 pub async fn get_prelogin_cookie(url: &str) -> Result<String, Box<dyn Error>> {
-    // Open the browser and navigate to the specified URL
-    unimplemented!()
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy: tao::event_loop::EventLoopProxy<UserEvent> = event_loop.create_proxy();
+    let window = WindowBuilder::new()
+        .with_title("PAN GlobalProtect")
+        .build(&event_loop)
+        .unwrap();
+    let handler = {
+        move |req: Request<String>| {
+            let body = req.body();
+            match body.as_str() {
+                "prelogin-cookie not found" => {}
+                _ => {
+                    println!("Sending prelogin-cookie: {}", body);
+                    let _ = proxy.send_event(UserEvent::CloseWindow(body.to_string()));
+                }
+            }
+        }
+    };
+
+    let builder = WebViewBuilder::new()
+        .with_url(url)
+        .with_ipc_handler(handler)
+        .with_initialization_script(
+            r#"
+                function checkAndSendContent() {
+                    if (window.location.href.includes('acs')) {
+                        const bodyContent = document.body.innerHTML;
+                        const pattern = /<!--.*?<prelogin-cookie>(.*?)<\/prelogin-cookie>.*?-->/s;
+                        const match = bodyContent.match(pattern);
+                        
+                        if (match && match[1]) {
+                            window.ipc.postMessage(match[1].trim());
+                        } else {
+                            window.ipc.postMessage("prelogin-cookie not found");
+                        }
+                    }
+                }
+
+                window.addEventListener('load', checkAndSendContent);
+            "#,
+        );
+
+    let _webview = builder.build(&window).unwrap();
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                println!("Window close requested");
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(UserEvent::CloseWindow(cookiestring)) => {
+                println!("Closing window");
+                *control_flow = ControlFlow::Exit;
+            }
+            _ => (),
+        }
+    });
+    Ok("1234".to_string())
 }
 
 // pub async fn perform_login(prelogin_cookie: &str) -> Result<String, Box<dyn Error>> {
@@ -140,27 +211,3 @@ pub async fn get_prelogin_cookie(url: &str) -> Result<String, Box<dyn Error>> {
 
 //     Ok(res.text().await?)
 // }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_get_login_url() {
-        let mut loginurl = String::new();
-        match get_login_url().await {
-            Ok(url) => loginurl = url,
-            Err(e) => {
-                panic!("Error: {}", e)
-            }
-        }
-        match get_prelogin_cookie(&loginurl).await {
-            Ok(cookie) => {
-                println!("Prelogin Cookie: {}", cookie);
-            }
-            Err(e) => {
-                panic!("Error: {}", e)
-            }
-        }
-    }
-}
