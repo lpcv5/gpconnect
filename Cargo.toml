@@ -12,7 +12,7 @@ libaes = "0.7.0"
 pnet = "0.35.0"
 tokio = { version = "1.40.0", features = ["full"] }
 log = "0.4"
-reqwest = { version = "0.12.8", features = ["json"] }
+reqwest = { version = "0.12.8", features = ["json", "cookies"] }
 simplelog = "0.12.2"
 serde = { version = "1.0", features = ["derive"] }
 serde-xml-rs = "0.6.0"

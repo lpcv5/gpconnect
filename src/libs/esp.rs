@@ -96,12 +96,12 @@ impl ESPPacket {
         Ok(())
     }
 
-    pub fn decrypt(&mut self, esp: &ESP) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub fn decrypt(&mut self, esp: &ESP) -> Result<(), Box<dyn std::error::Error>> {
         // 验证 HMAC
-        let hmac = &self.hmac;
+        let hmac = self.hmac;
         let data = &self.data;
         let expected_hmac = hmacsha1::hmac_sha1(&esp.mac_key, data);
-        if &expected_hmac != hmac {
+        if expected_hmac != hmac {
             return Err("HMAC verification failed".into());
         }
 
@@ -110,9 +110,9 @@ impl ESPPacket {
 
         // 去除填充数据
         let padding_len = data[data.len() - 1] as usize;
-        let data = &data[..data.len() - padding_len];
+        self.data = data[..data.len() - padding_len].to_vec();
 
-        Ok(data.to_vec())
+        Ok(())
     }
 }
 
@@ -124,7 +124,7 @@ mod tests {
     fn test_esp() {
         let data_hex =
         "4500002cdc4c40004001a5480ac121010ac182b90000103c474702cd6d6f6e69746f72000070616e20686120";
-        let data = hex::decode(data_hex).unwrap();
+        let orig_data = hex::decode(data_hex).unwrap();
 
         let esp = ESP::new(
             1u32,
@@ -138,7 +138,7 @@ mod tests {
                 .try_into()
                 .unwrap(),
         );
-        let mut esppacket = ESPPacket::new(&esp, data.clone().try_into().unwrap());
+        let mut esppacket = ESPPacket::new(&esp, orig_data.clone().try_into().unwrap());
         if let Err(e) = esppacket.encrypt(&esp) {
             panic!("Encrypt error: {}", e);
         }
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(esppacket_in.hmac, esppacket.hmac);
 
         match esppacket_in.decrypt(&esp) {
-            Ok(data) => assert_eq!(data, data),
+            Ok(_) => assert_eq!(esppacket_in.data, orig_data),
             Err(e) => panic!("Decrypt error: {}", e),
         }
     }

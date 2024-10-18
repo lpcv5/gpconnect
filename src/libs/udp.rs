@@ -1,93 +1,120 @@
-use std::{
-    net::{Ipv4Addr, SocketAddrV4},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::error::Error;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
-use tokio::{
-    io::{split, AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+pub struct UdpClient {
+    socket: Arc<UdpSocket>,
+    server_addr: SocketAddr,
+    tx: mpsc::Sender<Vec<u8>>,
+}
 
-const CMD_UDP: u8 = 1;
+impl UdpClient {
+    pub async fn new(
+        local_addr: &str,
+        server_addr: &str,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let socket = UdpSocket::bind(local_addr).await?;
+        let server_addr: SocketAddr = server_addr.parse()?;
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);
 
-pub async fn worker(server: String, udp_worker: tun2layer4::UdpWorker) -> tun2layer4::UdpWorker {
-    // UDP
-    let mut udp_ctrl_conn = match TcpStream::connect(server.clone()).await {
-        Ok(_conn) => _conn,
-        Err(_) => {
-            return udp_worker;
-        }
-    };
+        let socket = Arc::new(socket);
+        let socket_clone = Arc::clone(&socket);
 
-    if let Err(_) = udp_ctrl_conn.write_u8(CMD_UDP).await {
-        return udp_worker;
-    }
-    log::info!("Connection established.");
-    let (mut r, mut w) = split(udp_ctrl_conn);
-    let udp_worker2 = udp_worker.clone();
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
+        println!("UdpClient listening on {}", local_addr);
 
-    tokio::spawn(async move {
-        let mut key = [0u8; 12];
-        let mut buf = vec![0u8; 2048];
-        while running_clone.load(Ordering::Relaxed) {
-            if let Err(_) = r.read_exact(&mut key).await {
-                running_clone.store(false, Ordering::Relaxed);
-                break;
-            }
-            let src = SocketAddrV4::new(
-                Ipv4Addr::new(key[0], key[1], key[2], key[3]),
-                u16::from_be_bytes([key[4], key[5]]),
-            );
-            let dst = SocketAddrV4::new(
-                Ipv4Addr::new(key[6], key[7], key[8], key[9]),
-                u16::from_be_bytes([key[10], key[11]]),
-            );
-            let _len = match r.read_u16().await {
-                Ok(n) => n as usize,
-                Err(_) => {
-                    running_clone.store(false, Ordering::Relaxed);
-                    break;
+        // 启动发送任务
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                if let Err(e) = socket_clone.send_to(&data, &server_addr).await {
+                    eprintln!("Failed to send data: {:?}", e);
                 }
-            };
-            if let Err(_) = r.read_exact(&mut buf[.._len]).await {
-                running_clone.store(false, Ordering::Relaxed);
-                break;
             }
-            if let Err(_) = udp_worker2.send_back(&buf[.._len], src, dst) {
-                running_clone.store(false, Ordering::Relaxed);
-                break;
-            }
-        }
-    });
+        });
 
-    let mut key = [0u8; 12];
-    let mut buf = vec![0u8; 2048];
-    while running.load(Ordering::Relaxed) {
-        if let Ok((src, dst, size)) = udp_worker.recv_from(&mut buf) {
-            key[..4].copy_from_slice(&src.ip().octets());
-            key[4..6].copy_from_slice(&src.port().to_be_bytes());
-            key[6..10].copy_from_slice(&dst.ip().octets());
-            key[10..12].copy_from_slice(&dst.port().to_be_bytes());
-            if let Err(_) = w.write_all(&key).await {
-                return udp_worker;
-            }
-            if let Err(_) = w.write_u16(size as u16).await {
-                return udp_worker;
-            }
-            if let Err(_) = w.write_all(&buf[..size]).await {
-                return udp_worker;
-            }
-            if let Err(_) = w.flush().await {
-                return udp_worker;
-            }
-        } else {
-            return udp_worker;
+        Ok(UdpClient {
+            socket,
+            server_addr,
+            tx,
+        })
+    }
+
+    pub async fn send(&self, data: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.tx.send(data).await?;
+        Ok(())
+    }
+
+    pub async fn receive(&self) -> Result<(Vec<u8>, SocketAddr), Box<dyn Error + Send + Sync>> {
+        let mut buf = vec![0u8; 1024];
+        let (len, addr) = self.socket.recv_from(&mut buf).await?;
+        buf.truncate(len);
+        Ok((buf, addr))
+    }
+
+    pub async fn run_receive_loop<F>(
+        &self,
+        mut callback: F,
+    ) -> Result<(), Box<dyn Error + Send + Sync>>
+    where
+        F: FnMut(Vec<u8>, SocketAddr) + Send + 'static,
+    {
+        loop {
+            let (data, addr) = self.receive().await?;
+            callback(data, addr);
         }
     }
-    udp_worker
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use tokio::net::UdpSocket;
+    use tokio::time::{sleep, Duration};
+
+    async fn run_mock_server(addr: SocketAddr) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let socket = UdpSocket::bind(addr).await?;
+        println!("Mock server listening on {}", addr);
+
+        let mut buf = vec![0u8; 1024];
+        let (len, client_addr) = socket.recv_from(&mut buf).await?;
+        println!("Server received: {}", String::from_utf8_lossy(&buf[..len]));
+
+        let response = b"Hello, client!";
+        socket.send_to(response, client_addr).await?;
+        println!("Server sent response");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_udp_client() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // 启动模拟服务器
+        let server_addr = "127.0.0.1:8090".parse::<SocketAddr>()?;
+        let server_handle = tokio::spawn(async move { run_mock_server(server_addr).await });
+
+        // 等待服务器启动
+        sleep(Duration::from_millis(100)).await;
+
+        // 创建客户端
+        let client = UdpClient::new("127.0.0.1:0", "127.0.0.1:8090").await?;
+
+        // 发送数据
+        client.send(b"Hello, server!".to_vec()).await?;
+        println!("Client sent message");
+
+        // 接收数据
+        let (received_data, _) = client.receive().await?;
+        let received_message = String::from_utf8_lossy(&received_data);
+        println!("Client received: {}", received_message);
+
+        // 验证接收到的消息
+        assert_eq!(received_message, "Hello, client!");
+
+        // 等待服务器完成
+        let _ = server_handle.await??;
+
+        Ok(())
+    }
 }
